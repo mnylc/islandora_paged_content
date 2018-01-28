@@ -983,6 +983,13 @@ function islandora_paged_content_page_derivatives($context) {
       'function' => array('islandora_ocr_derive_hocr'),
       'file' => "$ocr_module_path/includes/derivatives.inc",
     );
+    $derivatives[] = array(
+      'source_dsid' => 'OBJ',
+      'destination_dsid' => NULL,
+      'weight' => 1,
+      'function' => array('islandora_ocr_remove_generating_rels_ext_statements'),
+      'file' => "$ocr_module_path/includes/derivatives.inc",
+    );
   }
   if (isset($derive['image']) && $derive['image']) {
     $derivatives[] = array(
@@ -1178,13 +1185,23 @@ function islandora_paged_content_extract_tiff_from_pdf($uri, $offset, $device, $
   $output_file = drupal_tempnam('temporary://', "page{$offset}.tif");
   // Need to link the file because of UTF-8 encoding.
   $copy = islandora_paged_content_create_clean_link($uri, 'pdfforgs');
-  $base_command = '!gs_path -q -dNOPAUSE -dBATCH -sDEVICE=!device -sCompression=lzw -sOutputFile=!output_file -r!resolution, -dFirstPage=!offset -dLastPage=!offset !pdf_uri';
+  // For all arguments see https://ghostscript.com/doc/current/Devices.htm#TIFF.
+  if ($device == 'tiff64nc' || $device == 'tiff48nc') {
+    // Both are 16bits per channel. No compression possible.
+    // GhostScript versions 9.10 through 9.18 seem affected by a Bug
+    // making this devices fail always.
+    // @see http://git.ghostscript.com/?p=ghostpdl.git;a=commitdiff;h=f8e77523.
+    $base_command = '!gs_path -q -dNOPAUSE -dBATCH -sDEVICE=!device -sCompression=none -sOutputFile=!output_file -r!resolution -dFirstPage=!offset -dLastPage=!offset !pdf_uri';
+  }
+  else {
+    $base_command = '!gs_path -q -dNOPAUSE -dBATCH -sDEVICE=!device -sCompression=lzw -sOutputFile=!output_file -r!resolution -dFirstPage=!offset -dLastPage=!offset !pdf_uri';
+  }
   $command = format_string($base_command, array(
     '!gs_path' => escapeshellarg($gs),
     '!device' => $device,
     '!offset' => $offset,
     '!output_file' => drupal_realpath($output_file),
-    '!resolution' => $resolution,
+    '!resolution' => (int) $resolution,
     '!pdf_uri' => escapeshellarg(drupal_realpath($copy)),
   ));
   $output = array();
@@ -1258,7 +1275,8 @@ function islandora_paged_content_can_extract_from_pdf() {
  */
 function islandora_paged_content_add_pdf_to_object(AbstractObject $object, $file_obj, $batch = FALSE) {
   module_load_include('inc', 'islandora_paged_content', 'includes/db');
-  if (!isset($object['PDF'])) {
+  $ingest = !isset($object['PDF']);
+  if ($ingest) {
     $pdf = $object->constructDatastream('PDF', 'M');
   }
   else {
@@ -1271,7 +1289,9 @@ function islandora_paged_content_add_pdf_to_object(AbstractObject $object, $file
   if ($pdf->mimetype != $file_obj->filemime) {
     $pdf->mimetype = $file_obj->filemime;
   }
-  $object->ingestDatastream($pdf);
+  if ($ingest) {
+    $object->ingestDatastream($pdf);
+  }
   if (!$batch) {
     islandora_paged_content_track_pdf_ingestion($object->id, $file_obj->fid);
   }
@@ -1298,8 +1318,9 @@ function islandora_paged_content_add_relationships_to_child(AbstractObject $obje
   islandora_paged_content_set_relationship($rels_ext, ISLANDORA_RELS_EXT_URI, 'isSequenceNumber', $params['page_number'], TRUE);
   islandora_paged_content_set_relationship($rels_ext, ISLANDORA_RELS_EXT_URI, 'isPageNumber', $params['page_number'], TRUE);
   islandora_paged_content_set_relationship($rels_ext, ISLANDORA_RELS_EXT_URI, 'isSection', '1', TRUE);
-  if ($params['extract_text'] == 'none') {
-    $object->relationships->add(ISLANDORA_RELS_EXT_URI, 'generate_ocr', 'FALSE', RELS_TYPE_PLAIN_LITERAL);
+  if ($params['extract_text'] == 'none' && module_exists('islandora_ocr')) {
+    module_load_include('inc', 'islandora_ocr', 'includes/derivatives');
+    islandora_ocr_set_generating_rels_ext_statements($object, FALSE, FALSE);
   }
   else {
     islandora_paged_content_set_relationship($rels_ext, ISLANDORA_RELS_EXT_URI, 'hasLanguage', $params['language'], TRUE);
